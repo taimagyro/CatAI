@@ -10,7 +10,7 @@ SYSTEM_PROMPT = """
 中学生にもわかりやすく説明してください。
 """
 
-API_KEY = os.getenv("GEMINI_API_KEY")
+API_KEY = os.getenv("CatAI")
 
 MEMORY_FILE = "memory.json"
 
