@@ -57,7 +57,7 @@ def ask_gemini(user_input):
     if not API_KEY:
         return "APIキーが設定されていません"
 
-   url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={API_KEY}"
+   url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={API_KEY}"
 
     # 履歴
     history_text = ""
