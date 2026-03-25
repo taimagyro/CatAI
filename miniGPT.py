@@ -1,7 +1,9 @@
+# python
 from flask import Flask, request, Response
 import json
 import requests
 import os
+import traceback
 
 app = Flask(__name__)
 
@@ -17,7 +19,7 @@ SYSTEM_PROMPT = """
 # =========================
 # APIキー（Render）
 # =========================
-API_KEY = os.getenv("CatAI")  # ←あなたの設定に合わせてる
+API_KEY = os.getenv("CatAI")  # ←環境変数名に合わせて設定する
 
 # =========================
 # 記憶ファイル
@@ -32,7 +34,7 @@ def load_memory():
         if os.path.exists(MEMORY_FILE):
             with open(MEMORY_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
-    except:
+    except Exception:
         pass
     return {"user_name": "", "history": []}
 
@@ -43,8 +45,8 @@ def save_memory():
     try:
         with open(MEMORY_FILE, "w", encoding="utf-8") as f:
             json.dump(memory, f, ensure_ascii=False, indent=2)
-    except:
-        print("保存エラー")
+    except Exception:
+        print("保存エラー:\n", traceback.format_exc())
 
 memory = load_memory()
 
@@ -52,17 +54,16 @@ memory = load_memory()
 # Gemini通信
 # =========================
 def ask_gemini(user_input):
-
     # APIキー確認
     if not API_KEY:
         return "APIキーが設定されていません"
 
-   url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={API_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={API_KEY}"
 
     # 履歴
     history_text = ""
     for h in memory["history"][-5:]:
-        history_text += f"ユーザー: {h['user']}\nAI: {h['ai']}\n"
+        history_text += f"ユーザー: {h.get('user','')}\nAI: {h.get('ai','')}\n"
 
     # 名前
     name_text = f"ユーザーの名前は{memory['user_name']}です。\n" if memory["user_name"] else ""
@@ -74,17 +75,22 @@ def ask_gemini(user_input):
     }
 
     try:
-        res = requests.post(url, json=body)
+        res = requests.post(url, json=body, timeout=10)
 
         # ステータスチェック
         if res.status_code != 200:
-            return f"AIエラー: {res.status_code}"
+            # 可能なら本文も表示して原因を確認
+            try:
+                return f"AIエラー: {res.status_code} - {res.text}"
+            except Exception:
+                return f"AIエラー: {res.status_code}"
 
         result = res.json()
 
         return result["candidates"][0]["content"]["parts"][0]["text"]
 
-    except Exception as e:
+    except Exception:
+        print("通信エラー:\n", traceback.format_exc())
         return "通信エラーが発生しました"
 
 # =========================
@@ -92,7 +98,6 @@ def ask_gemini(user_input):
 # =========================
 @app.route("/chat", methods=["POST"])
 def chat():
-
     try:
         data = request.get_json()
         user_input = data.get("message", "")
@@ -118,14 +123,16 @@ def chat():
             content_type="application/json; charset=utf-8"
         )
 
-    except Exception as e:
+    except Exception:
+        print("サーバー処理エラー:\n", traceback.format_exc())
         return Response(
             json.dumps({"reply": "サーバーエラーが発生しました"}, ensure_ascii=False),
             content_type="application/json; charset=utf-8"
         )
 
 # =========================
-# 起動
+# 起動（Render 用に PORT を利用）
 # =========================
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
