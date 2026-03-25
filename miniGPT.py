@@ -15,7 +15,7 @@ SYSTEM_PROMPT = """
 """
 
 # APIキー（Renderから取得）
-API_KEY = os.getenv("GEMINI_API_KEY")
+API_KEY = os.getenv("CatAI")
 
 # =========================
 # 自分のAI（記憶）
