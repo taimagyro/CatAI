@@ -16,7 +16,7 @@ SYSTEM_PROMPT = """
 相手を否定せず、やさしく導いてください。
 """
 
-API_KEY = os.getenv("CATAI_API_KEY") or os.getenv("CatAI")
+API_KEY =os.getenv("CatAI")
 if not API_KEY:
     print("警告: 環境変数 `CATAI_API_KEY` または `CatAI` が設定されていません。")
 
