@@ -1,142 +1,112 @@
 # python
-# ファイル: `memory_store.py`
-import sqlite3
+from pathlib import Path
 import json
+import threading
+import base64
 import time
-from typing import List, Dict, Any, Optional
+import os
+from typing import Dict, Any, List
 
 class MemoryStore:
     """
-    SQLiteベースのアカウントごとのメモリ管理。
-    - accounts: account_id, user_name, mentor_prompt, created_at
-    - messages: id, account_id, role ('user'|'ai'), content, ts
+    JSONベースの簡易メモリストア。
+    ファイルは ./memories に保存され、ファイル毎にスレッドロックを持つ。
     """
-    def __init__(self, db_path: str = "memories.db"):
-        self.db_path = db_path
-        self._conn = sqlite3.connect(self.db_path, timeout=30, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._apply_pragmas()
-        self._init_schema()
 
-    def _apply_pragmas(self):
-        cur = self._conn.cursor()
-        cur.execute("PRAGMA journal_mode=WAL;")
-        cur.execute("PRAGMA synchronous=NORMAL;")
-        cur.close()
+    def __init__(self, base_dir: str = "memories", max_history: int = 500):
+        self.base_dir = Path(base_dir)
+        self.base_dir.mkdir(parents=True, exist_ok=True)
+        self.max_history = max_history
+        self._locks: Dict[str, threading.Lock] = {}
+        self._global_lock = threading.Lock()
 
-    def _init_schema(self):
-        cur = self._conn.cursor()
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS accounts (
-            account_id TEXT PRIMARY KEY,
-            user_name TEXT DEFAULT '',
-            mentor_prompt TEXT DEFAULT '',
-            created_at INTEGER
-        );
-        """)
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            account_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            content TEXT NOT NULL,
-            ts INTEGER NOT NULL,
-            FOREIGN KEY(account_id) REFERENCES accounts(account_id) ON DELETE CASCADE
-        );
-        """)
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_account_ts ON messages(account_id, ts DESC);")
-        self._conn.commit()
-        cur.close()
+    def _safe_name(self, account_id: str) -> str:
+        if not account_id:
+            account_id = "default"
+        b = base64.urlsafe_b64encode(account_id.encode("utf-8")).decode("ascii")
+        b = b.rstrip("=")
+        return f"memory_{b}.json"
 
-    def get_profile(self, account_id: str) -> Dict[str, Any]:
-        cur = self._conn.cursor()
-        cur.execute("SELECT account_id, user_name, mentor_prompt, created_at FROM accounts WHERE account_id = ?;", (account_id,))
-        row = cur.fetchone()
-        cur.close()
-        if row:
-            return dict(row)
-        # create default profile if not exists
-        now = int(time.time())
-        cur = self._conn.cursor()
-        cur.execute("INSERT OR IGNORE INTO accounts(account_id, user_name, mentor_prompt, created_at) VALUES (?, ?, ?, ?);",
-                    (account_id, "", "", now))
-        self._conn.commit()
-        cur.close()
-        return {"account_id": account_id, "user_name": "", "mentor_prompt": "", "created_at": now}
+    def _path(self, account_id: str) -> Path:
+        return self.base_dir / self._safe_name(account_id)
 
-    def set_profile(self, account_id: str, user_name: Optional[str] = None, mentor_prompt: Optional[str] = None):
-        # upsert pattern
-        cur = self._conn.cursor()
-        cur.execute("INSERT OR IGNORE INTO accounts(account_id, user_name, mentor_prompt, created_at) VALUES (?, ?, ?, ?);",
-                    (account_id, user_name or "", mentor_prompt or "", int(time.time())))
-        if user_name is not None:
-            cur.execute("UPDATE accounts SET user_name = ? WHERE account_id = ?;", (user_name, account_id))
-        if mentor_prompt is not None:
-            cur.execute("UPDATE accounts SET mentor_prompt = ? WHERE account_id = ?;", (mentor_prompt, account_id))
-        self._conn.commit()
-        cur.close()
+    def _get_lock(self, path: Path) -> threading.Lock:
+        key = str(path)
+        with self._global_lock:
+            if key not in self._locks:
+                self._locks[key] = threading.Lock()
+            return self._locks[key]
 
-    def append_message_pair(self, account_id: str, user_text: str, ai_text: str):
-        ts = int(time.time())
-        cur = self._conn.cursor()
-        cur.executemany(
-            "INSERT INTO messages(account_id, role, content, ts) VALUES (?, ?, ?, ?);",
-            [(account_id, "user", user_text, ts), (account_id, "ai", ai_text, ts + 1)]
-        )
-        self._conn.commit()
-        cur.close()
+    def load(self, account_id: str) -> Dict[str, Any]:
+        """
+        指定アカウントのメモリを読み込む。存在しない場合はデフォルト構造を返す。
+        """
+        p = self._path(account_id)
+        lock = self._get_lock(p)
+        with lock:
+            if not p.exists():
+                return {"user_name": "", "history": [], "mentor_prompt": ""}
+            try:
+                text = p.read_text(encoding="utf-8").strip()
+                if not text:
+                    return {"user_name": "", "history": [], "mentor_prompt": ""}
+                data = json.loads(text)
+                if not isinstance(data, dict):
+                    return {"user_name": "", "history": [], "mentor_prompt": ""}
+                data.setdefault("user_name", "")
+                data.setdefault("history", [])
+                data.setdefault("mentor_prompt", "")
+                return data
+            except Exception:
+                return {"user_name": "", "history": [], "mentor_prompt": ""}
 
-    def append_message(self, account_id: str, role: str, content: str):
-        ts = int(time.time())
-        cur = self._conn.cursor()
-        cur.execute("INSERT INTO messages(account_id, role, content, ts) VALUES (?, ?, ?, ?);",
-                    (account_id, role, content, ts))
-        self._conn.commit()
-        cur.close()
+    def save(self, account_id: str, memory: Dict[str, Any]) -> None:
+        """
+        指定アカウントのメモリをアトミックに保存する。
+        """
+        p = self._path(account_id)
+        lock = self._get_lock(p)
+        with lock:
+            tmp = p.with_suffix(".tmp")
+            tmp.write_text(json.dumps(memory, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(str(tmp), str(p))
 
-    def get_recent_history(self, account_id: str, limit: int = 20) -> List[Dict[str, Any]]:
-        cur = self._conn.cursor()
-        cur.execute(
-            "SELECT role, content, ts FROM messages WHERE account_id = ? ORDER BY ts DESC LIMIT ?;",
-            (account_id, limit)
-        )
-        rows = cur.fetchall()
-        cur.close()
-        # 返す順序: 古い->新しい
-        return [dict(r) for r in reversed(rows)]
+    def append_history(self, account_id: str, user_text: str, ai_text: str) -> None:
+        """
+        履歴を追加し、必要ならトリミングする。
+        """
+        mem = self.load(account_id)
+        mem.setdefault("history", [])
+        mem["history"].append({"user": user_text, "ai": ai_text, "ts": int(time.time())})
+        if len(mem["history"]) > self.max_history:
+            mem["history"] = mem["history"][-self.max_history:]
+        self.save(account_id, mem)
 
-    def prune_history(self, account_id: str, keep: int = 200):
-        # keep 最新 keep 件、古いものを削除
-        cur = self._conn.cursor()
-        cur.execute("""
-        DELETE FROM messages WHERE id IN (
-            SELECT id FROM messages WHERE account_id = ? ORDER BY ts DESC LIMIT -1 OFFSET ?
-        );
-        """, (account_id, keep))
-        self._conn.commit()
-        cur.close()
+    def set_user_name(self, account_id: str, name: str) -> None:
+        mem = self.load(account_id)
+        mem["user_name"] = name or ""
+        self.save(account_id, mem)
 
-    def delete_account(self, account_id: str):
-        cur = self._conn.cursor()
-        cur.execute("DELETE FROM messages WHERE account_id = ?;", (account_id,))
-        cur.execute("DELETE FROM accounts WHERE account_id = ?;", (account_id,))
-        self._conn.commit()
-        cur.close()
+    def list_accounts(self) -> List[str]:
+        """
+        保存されているアカウント一覧（安全なファイル名から復元不可／返すのはファイル名）を返す。
+        """
+        files = []
+        for p in self.base_dir.glob("memory_*.json"):
+            files.append(p.name)
+        return files
 
-    def export_account(self, account_id: str) -> Dict[str, Any]:
-        profile = self.get_profile(account_id)
-        history = self.get_recent_history(account_id, limit=10000)
-        return {"profile": profile, "history": history}
-
-    def close(self):
-        self._conn.close()
-
-
-# 簡単な使用例（Flask から呼ぶ想定）
-if __name__ == "__main__":
-    store = MemoryStore("memories.db")
-    store.set_profile("alice", user_name="Alice", mentor_prompt="優しく導くメンターです。")
-    store.append_message_pair("alice", "こんにちは", "こんにちは、調子はどう？")
-    print(store.get_recent_history("alice", limit=10))
-    print(json.dumps(store.export_account("alice"), ensure_ascii=False, indent=2))
-    store.close()
+    def delete(self, account_id: str) -> bool:
+        """
+        指定アカウントのメモリを削除する。成功すれば True。
+        """
+        p = self._path(account_id)
+        lock = self._get_lock(p)
+        with lock:
+            try:
+                if p.exists():
+                    p.unlink()
+                    return True
+            except Exception:
+                pass
+        return False
