@@ -89,7 +89,7 @@ class MemoryStore:
 
     def list_accounts(self) -> List[str]:
         """
-        保存されているアカウント一覧（安全なファイル名から復元不可／返すのはファイル名）を返す。
+        保存されているアカウント一覧（安全なファイル名）を返す。
         """
         files = []
         for p in self.base_dir.glob("memory_*.json"):
