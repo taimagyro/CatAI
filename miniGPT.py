@@ -158,10 +158,13 @@ def chat():
 
     except Exception as e:
         print(e)
-        return Response(
-            json.dumps({"reply": "サーバーエラー"}, ensure_ascii=False),
-            content_type="application/json; charset=utf-8"
-        )
+       return Response(
+    json.dumps({
+        "reply": reply,
+        "remaining": MAX_FREE - user["count"]
+    }, ensure_ascii=False),
+    content_type="application/json; charset=utf-8"
+)
 
 # =========================
 # 起動
