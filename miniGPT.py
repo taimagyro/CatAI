@@ -2,29 +2,63 @@ from flask import Flask, request, Response
 import json
 import requests
 import os
-
-# 🔥 ここが重要（分離した記憶を読み込む）
-from memory_store import load_memory, save_memory, get_user, save_training
+from supabase import create_client
 
 app = Flask(__name__)
 
 # =========================
-# メンターAI設定
+# 設定
 # =========================
 SYSTEM_PROMPT = """
 あなたは優しくて賢いメンターAIです。
 中学生にもわかりやすく説明してください。
 """
 
-# =========================
-# APIキー
-# =========================
 API_KEY = os.getenv("CatAI")
 
+# 🔥 Supabase接続
+SUPABASE_URL = "ここにURL"
+SUPABASE_KEY = "ここにanonキー"
+
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
 # =========================
-# 記憶読み込み
+# ユーザー取得
 # =========================
-memory = load_memory()
+def get_user(user_id):
+
+    res = supabase.table("users").select("*").eq("id", user_id).execute()
+
+    if res.data:
+        return res.data[0]
+    else:
+        new_user = {
+            "id": user_id,
+            "name": "",
+            "history": []
+        }
+        supabase.table("users").insert(new_user).execute()
+        return new_user
+
+# =========================
+# ユーザー保存
+# =========================
+def save_user(user):
+
+    supabase.table("users").update({
+        "name": user["name"],
+        "history": user["history"]
+    }).eq("id", user["id"]).execute()
+
+# =========================
+# 学習データ保存
+# =========================
+def save_training(user_input, reply):
+
+    supabase.table("training_data").insert({
+        "input": user_input,
+        "output": reply
+    }).execute()
 
 # =========================
 # Gemini
@@ -32,16 +66,14 @@ memory = load_memory()
 def ask_gemini(user_input, user):
 
     if not API_KEY:
-        return "AIzaSyC0NXuR5tg1Eyq3D8-mbR6qFh4LipjlXXA"
+        return "APIキーがありません"
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={API_KEY}"
 
-    # 会話履歴
     history_text = ""
     for h in user["history"][-5:]:
         history_text += f"ユーザー: {h['user']}\nAI: {h['ai']}\n"
 
-    # 名前情報
     name_text = f"ユーザーの名前は{user['name']}です。\n" if user["name"] else ""
 
     prompt = SYSTEM_PROMPT + "\n" + name_text + history_text + "ユーザー: " + user_input
@@ -57,10 +89,9 @@ def ask_gemini(user_input, user):
             return f"AIエラー: {res.status_code}"
 
         result = res.json()
-
         return result["candidates"][0]["content"]["parts"][0]["text"]
 
-    except Exception as e:
+    except:
         return "通信エラー"
 
 # =========================
@@ -75,8 +106,7 @@ def chat():
         user_input = data.get("message", "")
         user_id = data.get("user_id", "default")
 
-        # 👤 ユーザーごとの記憶取得
-        user = get_user(memory, user_id)
+        user = get_user(user_id)
 
         # 名前登録
         if "名前は" in user_input:
@@ -86,17 +116,17 @@ def chat():
         else:
             reply = ask_gemini(user_input, user)
 
-        # 🧠 会話履歴保存
+        # 履歴更新
         user["history"].append({
             "user": user_input,
             "ai": reply
         })
 
-        # 🔥 学習データ保存（未来のAI用）
-        save_training(user_input, reply)
+        # 保存
+        save_user(user)
 
-        # 💾 メモリ保存
-        save_memory(memory)
+        # 学習データ
+        save_training(user_input, reply)
 
         return Response(
             json.dumps({"reply": reply}, ensure_ascii=False),
@@ -104,8 +134,9 @@ def chat():
         )
 
     except Exception as e:
+        print(e)
         return Response(
-            json.dumps({"reply": "サーバーエラーが発生しました"}, ensure_ascii=False),
+            json.dumps({"reply": "サーバーエラー"}, ensure_ascii=False),
             content_type="application/json; charset=utf-8"
         )
 
