@@ -17,8 +17,8 @@ SYSTEM_PROMPT = """
 API_KEY = os.getenv("CatAI")
 
 # 🔥 Supabase接続
-SUPABASE_URL = "ここにURL"
-SUPABASE_KEY = "ここにanonキー"
+SUPABASE_URL = "https://yhmrprwqeklcxxijdlfo.supabase.co"
+SUPABASE_KEY = "sb_publishable_uBO2nh4rfszQg-7CLF20dw_KdOBmXwP"
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
@@ -66,7 +66,7 @@ def save_training(user_input, reply):
 def ask_gemini(user_input, user):
 
     if not API_KEY:
-        return "APIキーがありません"
+        return "AIzaSyC0NXuR5tg1Eyq3D8-mbR6qFh4LipjlXXA"
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={API_KEY}"
 
