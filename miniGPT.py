@@ -32,7 +32,7 @@ memory = load_memory()
 def ask_gemini(user_input, user):
 
     if not API_KEY:
-        return "APIキーがありません"
+        return "AIzaSyC0NXuR5tg1Eyq3D8-mbR6qFh4LipjlXXA"
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={API_KEY}"
 
