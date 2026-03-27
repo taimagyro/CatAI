@@ -163,3 +163,21 @@ def feedback():
 # =========================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+# =========================
+# 良い回答を取得
+# =========================
+def get_good_examples(user_id):
+
+    res = supabase.table("training_data") \
+        .select("input, output") \
+        .eq("user_id", user_id) \
+        .eq("good", True) \
+        .limit(3) \
+        .execute()
+
+    examples = ""
+
+    for row in res.data:
+        examples += f"ユーザー: {row['input']}\nAI: {row['output']}\n"
+
+    return examples
