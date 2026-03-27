@@ -19,6 +19,14 @@ SYSTEM_PROMPT = """
 中学生にもわかりやすく説明してください。
 """
 
+SAFETY_PROMPT = """
+あなたはAIの安全チェック係です。
+以下の文章が安全か判定してください。
+
+危険な場合 → NG
+安全な場合 → OK
+"""
+
 MAX_FREE = 20
 RESET_HOURS = 6
 
@@ -43,29 +51,16 @@ def get_user(user_id):
         return new_user
 
 # =========================
-# ユーザー保存
+# 保存
 # =========================
 def save_user(user):
-    supabase.table("users").update({
-        "name": user["name"],
-        "history": user["history"],
-        "count": user["count"],
-        "last_reset": user["last_reset"],
-        "is_premium": user.get("is_premium", False)
-    }).eq("id", user["id"]).execute()
+    supabase.table("users").update(user).eq("id", user["id"]).execute()
 
 # =========================
 # Gemini
 # =========================
-def ask_gemini(user_input, user):
-
+def call_ai(prompt):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={API_KEY}"
-
-    history_text = ""
-    for h in user["history"][-5:]:
-        history_text += f"ユーザー: {h['user']}\nAI: {h['ai']}\n"
-
-    prompt = SYSTEM_PROMPT + "\n" + history_text + "ユーザー: " + user_input
 
     body = {
         "contents": [{"parts": [{"text": prompt}]}]
@@ -74,23 +69,38 @@ def ask_gemini(user_input, user):
     res = requests.post(url, json=body)
 
     if res.status_code != 200:
-        return f"AIエラー: {res.status_code}"
+        return "AIエラー"
 
     result = res.json()
     return result["candidates"][0]["content"]["parts"][0]["text"]
+
+# =========================
+# 安全チェック
+# =========================
+def check_safety(text):
+    result = call_ai(SAFETY_PROMPT + "\n文章：" + text)
+    return result
 
 # =========================
 # チャット
 # =========================
 @app.route("/chat", methods=["POST"])
 def chat():
-    data = request.get_json()
 
+    data = request.get_json()
     user_input = data.get("message", "")
     user_id = data.get("user_id", "default")
 
     user = get_user(user_id)
 
+    # 🔥 入力チェック
+    if "NG" in check_safety(user_input):
+        return Response(json.dumps({
+            "reply": "その内容は送信できません",
+            "remaining": MAX_FREE - user["count"]
+        }), content_type="application/json")
+
+    # リセット
     now = datetime.utcnow()
     last_reset = datetime.fromisoformat(user["last_reset"])
 
@@ -98,16 +108,28 @@ def chat():
         user["count"] = 0
         user["last_reset"] = now.isoformat()
 
+    # 制限
     if not user.get("is_premium") and user["count"] >= MAX_FREE:
         return Response(json.dumps({
             "reply": "制限に達しました",
             "remaining": 0
         }), content_type="application/json")
 
-    reply = ask_gemini(user_input, user)
+    # 会話AI
+    history_text = ""
+    for h in user["history"][-5:]:
+        history_text += f"ユーザー:{h['user']}\nAI:{h['ai']}\n"
 
-    # 🔥 学習保存
-    save_training(user_id, user_input, reply)
+    prompt = SYSTEM_PROMPT + "\n" + history_text + "ユーザー:" + user_input
+
+    reply = call_ai(prompt)
+
+    # 🔥 出力チェック
+    if "NG" in check_safety(reply):
+        reply = "安全のため回答できません"
+
+    # 🔥 学習保存（ID取得）
+    record_id = save_training(user_id, user_input, reply)
 
     user["count"] += 1
     user["history"].append({"user": user_input, "ai": reply})
@@ -116,22 +138,25 @@ def chat():
 
     return Response(json.dumps({
         "reply": reply,
-        "remaining": MAX_FREE - user["count"]
+        "remaining": MAX_FREE - user["count"],
+        "record_id": record_id  # ←これ超重要
     }), content_type="application/json")
 
+
 # =========================
-# 評価API（いいねボタン）
+# 評価API
 # =========================
 @app.route("/feedback", methods=["POST"])
 def feedback():
     data = request.get_json()
 
     record_id = data.get("record_id")
-    is_good = data.get("good")
+    good = data.get("good")
 
-    update_feedback(record_id, is_good)
+    update_feedback(record_id, good)
 
     return {"status": "ok"}
+
 
 # =========================
 # 起動
