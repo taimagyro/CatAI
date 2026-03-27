@@ -49,12 +49,7 @@ RESET_HOURS = 6
 # AI呼び出し
 # =========================
 def call_ai(prompt):
-
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={API_KEY}"
-
-    body = {
-        "contents": [{"parts": [{"text": prompt}]}]
-    }
+    return ask_llama(prompt)
 
     try:
         res = requests.post(url, json=body)
