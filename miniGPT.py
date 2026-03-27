@@ -4,28 +4,16 @@ import requests
 import os
 from supabase import create_client
 from datetime import datetime, timedelta
+from memory_store import save_training, update_feedback
 
 app = Flask(__name__)
 
-# =========================
-# 安全なキー取得
-# =========================
 API_KEY = os.getenv("CatAI")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-# チェック（これ超重要）
-if not API_KEY:
-    raise Exception("❌ CatAI APIキーが設定されていません")
-
-if not SUPABASE_URL or not SUPABASE_KEY:
-    raise Exception("❌ Supabaseキーが設定されていません")
-
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# =========================
-# 設定
-# =========================
 SYSTEM_PROMPT = """
 あなたは優しくて賢いメンターAIです。
 中学生にもわかりやすく説明してください。
@@ -77,104 +65,73 @@ def ask_gemini(user_input, user):
     for h in user["history"][-5:]:
         history_text += f"ユーザー: {h['user']}\nAI: {h['ai']}\n"
 
-    name_text = f"ユーザーの名前は{user['name']}です。\n" if user["name"] else ""
-
-    prompt = SYSTEM_PROMPT + "\n" + name_text + history_text + "ユーザー: " + user_input
+    prompt = SYSTEM_PROMPT + "\n" + history_text + "ユーザー: " + user_input
 
     body = {
         "contents": [{"parts": [{"text": prompt}]}]
     }
 
-    try:
-        res = requests.post(url, json=body)
+    res = requests.post(url, json=body)
 
-        if res.status_code != 200:
-            return f"AIエラー: {res.status_code}"
+    if res.status_code != 200:
+        return f"AIエラー: {res.status_code}"
 
-        result = res.json()
-        return result["candidates"][0]["content"]["parts"][0]["text"]
-
-    except Exception as e:
-        print("Geminiエラー:", e)
-        return "AI通信エラー"
+    result = res.json()
+    return result["candidates"][0]["content"]["parts"][0]["text"]
 
 # =========================
-# API
+# チャット
 # =========================
 @app.route("/chat", methods=["POST"])
 def chat():
-    try:
-        data = request.get_json()
+    data = request.get_json()
 
-        user_input = data.get("message", "")
-        user_id = data.get("user_id", "default")
+    user_input = data.get("message", "")
+    user_id = data.get("user_id", "default")
 
-        user = get_user(user_id)
+    user = get_user(user_id)
 
-        # =========================
-        # リセット処理
-        # =========================
-        now = datetime.utcnow()
-        last_reset = user.get("last_reset")
+    now = datetime.utcnow()
+    last_reset = datetime.fromisoformat(user["last_reset"])
 
-        if last_reset:
-            last_reset = datetime.fromisoformat(last_reset)
+    if now - last_reset > timedelta(hours=RESET_HOURS):
+        user["count"] = 0
+        user["last_reset"] = now.isoformat()
 
-            if now - last_reset > timedelta(hours=RESET_HOURS):
-                user["count"] = 0
-                user["last_reset"] = now.isoformat()
+    if not user.get("is_premium") and user["count"] >= MAX_FREE:
+        return Response(json.dumps({
+            "reply": "制限に達しました",
+            "remaining": 0
+        }), content_type="application/json")
 
-        # =========================
-        # 制限チェック（プレミアム除外）
-        # =========================
-        if not user.get("is_premium") and user.get("count", 0) >= MAX_FREE:
-            return Response(
-                json.dumps({
-                    "reply": "無料回数（20回）を超えました。\n6時間後にまた使えます！",
-                    "remaining": 0
-                }, ensure_ascii=False),
-                content_type="application/json; charset=utf-8"
-            )
+    reply = ask_gemini(user_input, user)
 
-        # =========================
-        # 名前登録
-        # =========================
-        if "名前は" in user_input:
-            name = user_input.replace("名前は", "").strip()
-            user["name"] = name
-            reply = f"{name}さん、覚えました！"
-        else:
-            reply = ask_gemini(user_input, user)
+    # 🔥 学習保存
+    save_training(user_id, user_input, reply)
 
-        # =========================
-        # カウント増加
-        # =========================
-        user["count"] = user.get("count", 0) + 1
+    user["count"] += 1
+    user["history"].append({"user": user_input, "ai": reply})
 
-        # =========================
-        # 履歴保存
-        # =========================
-        user["history"].append({
-            "user": user_input,
-            "ai": reply
-        })
+    save_user(user)
 
-        save_user(user)
+    return Response(json.dumps({
+        "reply": reply,
+        "remaining": MAX_FREE - user["count"]
+    }), content_type="application/json")
 
-        return Response(
-            json.dumps({
-                "reply": reply,
-                "remaining": MAX_FREE - user["count"]
-            }, ensure_ascii=False),
-            content_type="application/json; charset=utf-8"
-        )
+# =========================
+# 評価API（いいねボタン）
+# =========================
+@app.route("/feedback", methods=["POST"])
+def feedback():
+    data = request.get_json()
 
-    except Exception as e:
-        print("サーバーエラー:", e)
-        return Response(
-            json.dumps({"reply": "サーバーエラー"}, ensure_ascii=False),
-            content_type="application/json; charset=utf-8"
-        )
+    record_id = data.get("record_id")
+    is_good = data.get("good")
+
+    update_feedback(record_id, is_good)
+
+    return {"status": "ok"}
 
 # =========================
 # 起動
