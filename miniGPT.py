@@ -261,3 +261,16 @@ def feedback():
 # =========================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+def ask_llama(prompt):
+    import requests
+
+    res = requests.post(
+        "http://localhost:11434/api/generate",
+        json={
+            "model": "llama3",
+            "prompt": "必ず日本語で答えて\n" + prompt,
+            "stream": False
+        }
+    )
+
+    return res.json()["response"]
