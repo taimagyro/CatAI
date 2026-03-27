@@ -4,268 +4,157 @@ import requests
 import os
 from supabase import create_client
 from datetime import datetime, timedelta
-from memory_store import save_training, update_feedback
 
 app = Flask(__name__)
 
-API_KEY = os.getenv("CatAI")
+# =========================
+# Supabase設定
+# =========================
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise Exception("❌ Supabaseキーが設定されていません")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # =========================
-# プロンプト
+# 設定
 # =========================
 SYSTEM_PROMPT = """
-あなたは中学生向けの最高のメンターAIです。
-
-・短く
-・わかりやすく
-・具体的に
-・やさしく
-"""
-
-SAFETY_PROMPT = "危険ならNG 安全ならOK"
-
-EVAL_PROMPT = """
-あなたはAIの評価者です。
-
-GOOD または BAD を必ず書く
-その後に理由を書く
-"""
-
-RULE_PROMPT = """
-以下の良い回答の理由から
-共通ルールを3つ作ってください
-
-短くまとめること
+あなたは優しくて賢いメンターAIです。
+中学生にもわかりやすく説明してください。
+必ず日本語で答えてください。
 """
 
 MAX_FREE = 20
 RESET_HOURS = 6
 
 # =========================
-# AI呼び出し
+# Llama（ローカルAI）
 # =========================
-def call_ai(prompt):
-    return ask_llama(prompt)
-
+def ask_llama(prompt):
     try:
-        res = requests.post(url, json=body)
+        res = requests.post(
+            "http://localhost:11434/api/generate",
+            json={
+                "model": "llama3",
+                "prompt": SYSTEM_PROMPT + "\n" + prompt,
+                "stream": False
+            }
+        )
 
         if res.status_code != 200:
-            return "AIエラー"
+            return f"AIエラー: {res.status_code}"
 
-        result = res.json()
-        return result["candidates"][0]["content"]["parts"][0]["text"]
+        return res.json()["response"]
 
     except Exception as e:
-        print("AIエラー:", e)
+        print("Llamaエラー:", e)
         return "AI通信エラー"
 
 # =========================
-# 安全チェック
-# =========================
-def check_safety(text):
-    return call_ai(SAFETY_PROMPT + "\n" + text)
-
-# =========================
-# 評価
-# =========================
-def evaluate_ai(user_input, ai_output):
-
-    prompt = f"""
-ユーザー:{user_input}
-AI:{ai_output}
-"""
-
-    result = call_ai(EVAL_PROMPT + prompt)
-
-    if "GOOD" in result:
-        return True, result
-    elif "BAD" in result:
-        return False, result
-    else:
-        return None, result
-
-# =========================
-# ルール生成🔥
-# =========================
-def generate_rules(user_id):
-
-    res = supabase.table("training_data") \
-        .select("reason") \
-        .eq("user_id", user_id) \
-        .eq("good", True) \
-        .limit(5) \
-        .execute()
-
-    reasons = ""
-
-    for row in res.data:
-        reasons += row["reason"] + "\n"
-
-    if reasons == "":
-        return ""
-
-    rules = call_ai(RULE_PROMPT + "\n" + reasons)
-
-    return rules
-
-# =========================
-# 良い例
-# =========================
-def get_good_examples(user_id):
-
-    res = supabase.table("training_data") \
-        .select("input, output, reason") \
-        .eq("user_id", user_id) \
-        .eq("good", True) \
-        .limit(3) \
-        .execute()
-
-    text = ""
-
-    for row in res.data:
-        text += f"""
-ユーザー:{row['input']}
-AI:{row['output']}
-理由:{row['reason']}
-"""
-
-    return text
-
-# =========================
-# ユーザー
+# ユーザー取得
 # =========================
 def get_user(user_id):
-
     res = supabase.table("users").select("*").eq("id", user_id).execute()
 
     if res.data:
         return res.data[0]
-
-    new_user = {
-        "id": user_id,
-        "name": "",
-        "history": [],
-        "count": 0,
-        "last_reset": datetime.utcnow().isoformat(),
-        "is_premium": False
-    }
-
-    supabase.table("users").insert(new_user).execute()
-    return new_user
-
-def save_user(user):
-    supabase.table("users").update(user).eq("id", user["id"]).execute()
+    else:
+        new_user = {
+            "id": user_id,
+            "name": "",
+            "history": [],
+            "count": 0,
+            "last_reset": datetime.utcnow().isoformat(),
+            "is_premium": False
+        }
+        supabase.table("users").insert(new_user).execute()
+        return new_user
 
 # =========================
-# CHAT
+# 保存
+# =========================
+def save_user(user):
+    supabase.table("users").update({
+        "name": user["name"],
+        "history": user["history"],
+        "count": user["count"],
+        "last_reset": user["last_reset"],
+        "is_premium": user.get("is_premium", False)
+    }).eq("id", user["id"]).execute()
+
+# =========================
+# API
 # =========================
 @app.route("/chat", methods=["POST"])
 def chat():
+    try:
+        data = request.get_json()
 
-    data = request.get_json()
+        user_input = data.get("message", "")
+        user_id = data.get("user_id", "default")
 
-    user_input = data.get("message", "")
-    user_id = data.get("user_id", "default")
+        user = get_user(user_id)
 
-    user = get_user(user_id)
+        # リセット処理
+        now = datetime.utcnow()
+        last_reset = user.get("last_reset")
 
-    # 安全チェック
-    if "NG" in check_safety(user_input):
-        return Response(json.dumps({"reply": "送信できません"}), content_type="application/json")
+        if last_reset:
+            last_reset = datetime.fromisoformat(last_reset)
+            if now - last_reset > timedelta(hours=RESET_HOURS):
+                user["count"] = 0
+                user["last_reset"] = now.isoformat()
 
-    # リセット
-    now = datetime.utcnow()
-    last = datetime.fromisoformat(user["last_reset"])
+        # 制限
+        if not user.get("is_premium") and user.get("count", 0) >= MAX_FREE:
+            return Response(
+                json.dumps({
+                    "reply": "無料回数（20回）を超えました。6時間後にまた使えます！",
+                    "remaining": 0
+                }, ensure_ascii=False),
+                content_type="application/json; charset=utf-8"
+            )
 
-    if now - last > timedelta(hours=RESET_HOURS):
-        user["count"] = 0
-        user["last_reset"] = now.isoformat()
+        # 名前登録
+        if "名前は" in user_input:
+            name = user_input.replace("名前は", "").strip()
+            user["name"] = name
+            reply = f"{name}さん、覚えました！"
+        else:
+            # 🔥 ここがLlama
+            reply = ask_llama(user_input)
 
-    # 制限
-    if user["count"] >= MAX_FREE:
-        return Response(json.dumps({"reply": "制限です"}), content_type="application/json")
+        # カウント
+        user["count"] = user.get("count", 0) + 1
 
-    # =========================
-    # 学習データ
-    # =========================
-    history = ""
-    for h in user["history"][-5:]:
-        history += f"ユーザー:{h['user']}\nAI:{h['ai']}\n"
+        # 履歴
+        user["history"].append({
+            "user": user_input,
+            "ai": reply
+        })
 
-    good_examples = get_good_examples(user_id)
-    rules = generate_rules(user_id)
+        save_user(user)
 
-    prompt = (
-        SYSTEM_PROMPT +
-        "\n【ルール】\n" + rules +
-        "\n【良い例】\n" + good_examples +
-        "\n【履歴】\n" + history +
-        "\nユーザー:" + user_input
-    )
+        return Response(
+            json.dumps({
+                "reply": reply,
+                "remaining": MAX_FREE - user["count"]
+            }, ensure_ascii=False),
+            content_type="application/json; charset=utf-8"
+        )
 
-    # AI回答
-    reply = call_ai(prompt)
-
-    # 出力安全
-    if "NG" in check_safety(reply):
-        reply = "回答できません"
-
-    # 保存
-    record_id = save_training(user_id, user_input, reply)
-
-    # 自己評価
-    good, reason = evaluate_ai(user_input, reply)
-
-    if good is not None:
-        update_feedback(record_id, good, reason)
-
-    # 更新
-    user["count"] += 1
-    user["history"].append({"user": user_input, "ai": reply})
-
-    save_user(user)
-
-    return Response(json.dumps({
-        "reply": reply,
-        "record_id": record_id,
-        "evaluation": reason
-    }, ensure_ascii=False), content_type="application/json")
-
-# =========================
-# フィードバック
-# =========================
-@app.route("/feedback", methods=["POST"])
-def feedback():
-
-    data = request.get_json()
-
-    record_id = data.get("record_id")
-    good = data.get("good")
-
-    update_feedback(record_id, good, "user feedback")
-
-    return {"status": "ok"}
+    except Exception as e:
+        print("サーバーエラー:", e)
+        return Response(
+            json.dumps({"reply": "サーバーエラー"}, ensure_ascii=False),
+            content_type="application/json; charset=utf-8"
+        )
 
 # =========================
 # 起動
 # =========================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
-def ask_llama(prompt):
-    import requests
-
-    res = requests.post(
-        "http://localhost:11434/api/generate",
-        json={
-            "model": "llama3",
-            "prompt": "必ず日本語で答えて\n" + prompt,
-            "stream": False
-        }
-    )
-
-    return res.json()["response"]
